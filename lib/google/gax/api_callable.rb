@@ -139,12 +139,12 @@ module Google
       #   The call settings to enumerate pages
       # @return [PagedEnumerable]
       #   returning self for further uses.
-      def start(api_call, request, settings, block)
+      def start(api_call, request, settings, op_proc: nil, enum_proc: nil)
         @func = api_call
         @request = request
         page_token = settings.page_token
         @request[@request_page_token_field] = page_token if page_token
-        @page = @page.dup_with(@func.call(@request, block))
+        @page = @page.dup_with(@func.call(@request, &enum_proc))
         self
       end
 
@@ -226,8 +226,19 @@ module Google
     #   e.g, if bundling and page_streaming are both configured
     def create_api_call(func, settings, params_extractor: nil,
                         exception_transformer: nil)
-      api_caller = proc do |api_call, request, _settings, block|
-        api_call.call(request, block)
+      api_caller = proc do |api_call, request, _settings, op_proc: nil, enum_proc: nil|
+        op = api_call.call(request, return_op: true, &enum_proc)
+
+        return if op.nil?
+
+        if enum_proc
+          Thread.new { op.execute }
+          nil
+        else
+          res = op.execute
+          op_proc.call op if op_proc
+          res
+        end
       end
 
       if settings.page_descriptor
@@ -243,7 +254,7 @@ module Google
         api_caller = bundleable(settings.bundle_descriptor)
       end
 
-      proc do |request, options = nil, &block|
+      proc do |request, options = nil, op_proc: nil, enum_proc: nil|
         this_settings = settings.merge(options)
         if params_extractor
           params = params_extractor.call(request)
@@ -257,7 +268,10 @@ module Google
                                      this_settings.metadata)
                    end
         begin
-          api_caller.call(api_call, request, this_settings, block)
+          api_caller.call(
+            api_call, request, this_settings,
+            op_proc: nil, enum_proc: enum_proc
+          )
         rescue *settings.errors => e
           error_class = Google::Gax.from_error(e)
           error = error_class.new('RPC failed')
@@ -286,8 +300,8 @@ module Google
     # @return [Proc] A proc takes the API call's request and returns
     #   an Event object.
     def bundleable(desc)
-      proc do |api_call, request, settings, block|
-        return api_call(request, block) unless settings.bundler
+      proc do |api_call, request, settings, op_proc: nil, enum_proc: nil|
+        return api_call(request, op_proc: op_proc, enum_proc: enum_proc) unless settings.bundler
         raise 'Bundling calls cannot accept blocks' if block
         the_id = Google::Gax.compute_bundle_id(
           request,
@@ -350,19 +364,17 @@ module Google
       total_timeout = (retry_options.backoff_settings.total_timeout_millis /
                        MILLIS_PER_SECOND)
 
-      proc do |request, block|
+      proc do |request, settings = {}, &block|
         delay = retry_options.backoff_settings.initial_retry_delay_millis
         timeout = (retry_options.backoff_settings.initial_rpc_timeout_millis /
                    MILLIS_PER_SECOND)
         deadline = Time.now + total_timeout
         begin
-          op = a_func.call(request,
-                           deadline: Time.now + timeout,
-                           metadata: metadata,
-                           return_op: true)
-          res = op.execute
-          block.call res, op if block
-          res
+          a_func.call(
+            request,
+            settings.merge(deadline: (Time.now + timeout), metadata: metadata),
+            &block
+          )
         rescue => exception
           unless exception.respond_to?(:code) &&
                  retry_options.retry_codes.include?(exception.code)
@@ -392,14 +404,12 @@ module Google
     # @param metadata [Hash] request metadata headers
     # @return [Proc] the original proc updated to the timeout arg
     def add_timeout_arg(a_func, timeout, metadata)
-      proc do |request, block|
-        op = a_func.call(request,
-                         deadline: Time.now + timeout,
-                         metadata: metadata,
-                         return_op: true)
-        res = op.execute
-        block.call op if block
-        res
+      proc do |request, settings = {}, &block|
+        a_func.call(
+          request,
+          settings.merge(deadline: Time.now + timeout, metadata: metadata),
+          &block
+        )
       end
     end
 
