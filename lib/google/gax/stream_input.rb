@@ -27,56 +27,60 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-require "google/gax/api_call/retry_policy"
-
 module Google
   module Gax
     ##
-    # Encapsulates the overridable settings for a particular API call.
-    #
-    # @!attribute [r] metadata
-    #   @return [Hash]
-    # @!attribute [r] retry_policy
-    #   @return [RetryPolicy, Object]
-    #
-    class CallOptions
-      attr_reader :metadata, :retry_policy
-
+    # Adds requests to a stream and holds the stream open until {#close} is
+    # called.
+    class StreamInput
       ##
-      # Create a new CallOptions object instance.
+      # dfdf
       #
-      # @param timeout [Numeric] The client-side timeout for API calls.
-      # @param metadata [Hash] The request header params.
-      # @param retry_policy [ApiCall::RetryPolicy, Hash, Proc] The policy for error retry. A custom proc that takes the
-      #   error as an argument and blocks can also be provided.
+      # @param requests [Object]
       #
-      def initialize timeout: nil, metadata: nil, retry_policy: nil
-        # Converts hash and nil to a policy object
-        retry_policy = ApiCall::RetryPolicy.new retry_policy.to_h if retry_policy.respond_to? :to_h
+      def initialize(*requests)
+        @queue = Queue.new
 
-        @timeout = timeout # allow to be nil so it can be overridden
-        @metadata = metadata.to_h # Ensure always hash, even for nil
-        @retry_policy = retry_policy
+        # Push initial requests into the queue
+        requests.each { |request| @queue.push request }
       end
 
       ##
-      # client-side timeout for API calls
+      # Adds a request object to the stream.
       #
-      # @return [Numeric]
-      def timeout
-        @timeout || 300
+      # @param request [Object]
+      #
+      def push request
+        @queue.push request
+      end
+      alias << push
+      alias append push
+
+      ##
+      # Closes the stream.
+      #
+      def close
+        @queue.push self
+        nil
       end
 
       ##
       # @private
+      # Iterates the requests given to the stream.
       #
-      # @param timeout [Numeric] The client-side timeout for API calls.
-      # @param metadata [Hash] the request header params.
-      # @param retry_policy [Hash] the policy for error retry.
-      def merge timeout: nil, metadata: nil, retry_policy: nil
-        @timeout ||= timeout
-        @metadata = metadata.merge @metadata if metadata
-        @retry_policy.merge retry_policy if @retry_policy.respond_to? :merge
+      # @yield [request] The block for accessing each request.
+      # @yieldparam [Object] request The request object.
+      #
+      # @return [Enumerator] An Enumerator is returned if no block is given.
+      #
+      def to_enum
+        return enum_for(:to_enum) unless block_given?
+        loop do
+          request = @queue.pop
+          break if request.equal? self
+          raise request if request.is_a? Exception
+          yield request
+        end
       end
     end
   end
